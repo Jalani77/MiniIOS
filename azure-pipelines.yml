@@ -1,0 +1,137 @@
+# Azure DevOps Pipeline for iOS App Store Deployment
+# Requires: Azure DevOps account with macOS agents
+
+trigger:
+  branches:
+    include:
+      - main
+  tags:
+    include:
+      - v*
+
+pool:
+  vmImage: 'macOS-latest'
+
+variables:
+  - name: scheme
+    value: 'HireDayApp'
+  - name: sdk
+    value: 'iphoneos'
+  - name: configuration
+    value: 'Release'
+  - name: workspacePath
+    value: '**/*.xcworkspace'
+  - name: projectPath
+    value: '**/*.xcodeproj'
+
+stages:
+  - stage: Build
+    displayName: 'Build iOS App'
+    jobs:
+      - job: BuildJob
+        displayName: 'Build and Archive'
+        steps:
+          - task: InstallAppleCertificate@2
+            displayName: 'Install Apple Distribution Certificate'
+            inputs:
+              certSecureFile: 'AppleDistributionCertificate.p12'
+              certPwd: '$(P12_PASSWORD)'
+              keychain: 'temp'
+              keychainPassword: '$(KEYCHAIN_PASSWORD)'
+
+          - task: InstallAppleProvisioningProfile@1
+            displayName: 'Install Provisioning Profile'
+            inputs:
+              provisioningProfileLocation: 'secureFiles'
+              provProfileSecureFile: 'AppStoreProvisioningProfile.mobileprovision'
+
+          - task: Xcode@5
+            displayName: 'Build iOS App'
+            inputs:
+              actions: 'build'
+              scheme: '$(scheme)'
+              sdk: '$(sdk)'
+              configuration: '$(configuration)'
+              xcWorkspacePath: '$(workspacePath)'
+              xcodeVersion: 'default'
+              packageApp: false
+              exportPath: '$(Build.ArtifactStagingDirectory)'
+              signingOption: 'manual'
+              signingIdentity: '$(APPLE_SIGNING_IDENTITY)'
+              provisioningProfileUuid: '$(APPLE_PROV_PROFILE_UUID)'
+
+          - task: Xcode@5
+            displayName: 'Archive iOS App'
+            inputs:
+              actions: 'archive'
+              scheme: '$(scheme)'
+              sdk: '$(sdk)'
+              configuration: '$(configuration)'
+              xcWorkspacePath: '$(workspacePath)'
+              xcodeVersion: 'default'
+              packageApp: true
+              archivePath: '$(Build.ArtifactStagingDirectory)/HireDayApp.xcarchive'
+              exportPath: '$(Build.ArtifactStagingDirectory)'
+              exportOptions: 'plist'
+              exportOptionsPlist: 'ExportOptions.plist'
+              signingOption: 'manual'
+              signingIdentity: '$(APPLE_SIGNING_IDENTITY)'
+              provisioningProfileUuid: '$(APPLE_PROV_PROFILE_UUID)'
+
+          - task: CopyFiles@2
+            displayName: 'Copy IPA to Artifact Staging Directory'
+            inputs:
+              contents: '**/*.ipa'
+              targetFolder: '$(Build.ArtifactStagingDirectory)'
+              flattenFolders: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish IPA Artifact'
+            inputs:
+              pathToPublish: '$(Build.ArtifactStagingDirectory)'
+              artifactName: 'drop'
+              publishLocation: 'Container'
+
+  - stage: Deploy
+    displayName: 'Deploy to App Store'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - job: DeployJob
+        displayName: 'Upload to App Store Connect'
+        steps:
+          - task: DownloadBuildArtifacts@0
+            displayName: 'Download Build Artifacts'
+            inputs:
+              buildType: 'current'
+              downloadType: 'single'
+              artifactName: 'drop'
+              downloadPath: '$(System.ArtifactsDirectory)'
+
+          - task: AppStoreRelease@1
+            displayName: 'Upload to App Store Connect'
+            inputs:
+              serviceEndpoint: 'AppStoreConnection'
+              releaseTrack: 'TestFlight'
+              appIdentifier: 'com.yourcompany.HireDayApp'
+              appType: 'iOS'
+              ipaPath: '$(System.ArtifactsDirectory)/**/*.ipa'
+              shouldSkipWaitingForProcessing: true
+              shouldSkipSubmission: true
+              teamId: '$(APPLE_TEAM_ID)'
+              teamName: '$(APPLE_TEAM_NAME)'
+
+          # Alternative: Use command line upload
+          - task: Bash@3
+            displayName: 'Upload to App Store Connect (Alternative)'
+            condition: failed()
+            inputs:
+              targetType: 'inline'
+              script: |
+                # Install xcrun altool for upload
+                xcrun altool --upload-app \
+                  --type ios \
+                  --file $(System.ArtifactsDirectory)/drop/*.ipa \
+                  --apiKey $(APP_STORE_CONNECT_API_KEY_ID) \
+                  --apiIssuer $(APP_STORE_CONNECT_ISSUER_ID) \
+                  --verbose
